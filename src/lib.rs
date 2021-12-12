@@ -1,116 +1,86 @@
-//! This contract implements simple counter backed by storage on blockchain.
-//!
-//! The contract provides methods to [increment] / [decrement] counter and
-//! [get it's current value][get_num] or [reset].
-//!
-//! [increment]: struct.Counter.html#method.increment
-//! [decrement]: struct.Counter.html#method.decrement
-//! [get_num]: struct.Counter.html#method.get_num
-//! [reset]: struct.Counter.html#method.reset
+use std::collections::VecDeque;
+use std::sync::{Arc, RwLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+// use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
+use near_sdk::collections::Vector;
+use near_sdk::near_bindgen;
 
-use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
-use near_sdk::{env, near_bindgen};
+use std::thread;
+use std::time::Duration;
 
 near_sdk::setup_alloc!();
 
-// add the following attributes to prepare your code for serialization and invocation on the blockchain
-// More built-in Rust attributes here: https://doc.rust-lang.org/reference/attributes.html#built-in-attributes-index
-#[near_bindgen]
-#[derive(Default, BorshDeserialize, BorshSerialize)]
-pub struct Counter {
-    // See more data types at https://doc.rust-lang.org/book/ch03-02-data-types.html
-    val: i8, // i8 is signed. unsigned integers are also available: u8, u16, u32, u64, u128
-}
+// const CMC_PRO_API_KEY: &str = "b89d1f7b-2ada-4334-9545-c6ce17e88698";
+// const CMC_SYMBOL: &str = "BTC";
+// const CMC_PRO_API_QUOTES_URI: &str = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest";
+const MAX_SIZE: usize = 5;
 
 #[near_bindgen]
-impl Counter {
-    /// Returns 8-bit signed integer of the counter value.
-    ///
-    /// This must match the type from our struct's 'val' defined above.
-    ///
-    /// Note, the parameter is `&self` (without being mutable) meaning it doesn't modify state.
-    /// In the frontend (/src/main.js) this is added to the "viewMethods" array
-    /// using near-cli we can call this by:
-    ///
-    /// ```bash
-    /// near view counter.YOU.testnet get_num
-    /// ```
-    pub fn get_num(&self) -> i8 {
-        return self.val;
-    }
+// #[derive(BorshDeserialize, BorshSerialize)]
+pub struct RateContract {
+    // #[borsh_skip]
+    // handle: Option<JoinHandle<()>>,
+    // values: Arc<RwLock<Vector<f64>>>,
+    values: Arc<RwLock<VecDeque<f64>>>,
+    stop_update: Arc<AtomicBool>,
+}
 
-    /// Increment the counter.
-    ///
-    /// Note, the parameter is "&mut self" as this function modifies state.
-    /// In the frontend (/src/main.js) this is added to the "changeMethods" array
-    /// using near-cli we can call this by:
-    ///
-    /// ```bash
-    /// near call counter.YOU.testnet increment --accountId donation.YOU.testnet
-    /// ```
-    pub fn increment(&mut self) {
-        // note: adding one like this is an easy way to accidentally overflow
-        // real smart contracts will want to have safety checks
-        // e.g. self.val = i8::wrapping_add(self.val, 1);
-        // https://doc.rust-lang.org/std/primitive.i8.html#method.wrapping_add
-        self.val += 1;
-        let log_message = format!("Increased number to {}", self.val);
-        env::log(log_message.as_bytes());
-        after_counter_change();
-    }
-
-    /// Decrement (subtract from) the counter.
-    ///
-    /// In (/src/main.js) this is also added to the "changeMethods" array
-    /// using near-cli we can call this by:
-    ///
-    /// ```bash
-    /// near call counter.YOU.testnet decrement --accountId donation.YOU.testnet
-    /// ```
-    pub fn decrement(&mut self) {
-        // note: subtracting one like this is an easy way to accidentally overflow
-        // real smart contracts will want to have safety checks
-        // e.g. self.val = i8::wrapping_sub(self.val, 1);
-        // https://doc.rust-lang.org/std/primitive.i8.html#method.wrapping_sub
-        self.val -= 1;
-        let log_message = format!("Decreased number to {}", self.val);
-        env::log(log_message.as_bytes());
-        after_counter_change();
-    }
-
-    /// Reset to zero.
-    pub fn reset(&mut self) {
-        self.val = 0;
-        // Another way to log is to cast a string into bytes, hence "b" below:
-        env::log(b"Reset counter to zero");
+impl Default for RateContract {
+    fn default() -> Self {
+        // let v = Vector::new(b"v".to_vec());
+        let v = VecDeque::new();
+        Self {
+            // handle: None,
+            values: Arc::new(RwLock::new(v)),
+            stop_update: Arc::new(AtomicBool::new(false))
+        }
     }
 }
 
-// unlike the struct's functions above, this function cannot use attributes #[derive(…)] or #[near_bindgen]
-// any attempts will throw helpful warnings upon 'cargo build'
-// while this function cannot be invoked directly on the blockchain, it can be called from an invoked function
-fn after_counter_change() {
-    // show helpful warning that i8 (8-bit signed integer) will overflow above 127 or below -128
-    env::log("Make sure you don't overflow, my friend.".as_bytes());
+#[near_bindgen]
+impl RateContract {
+    #[init]
+    pub fn new(refresh_ms: u64) -> Self {
+        let res = Self::default();
+
+        let _handle = thread::spawn({
+            let values = Arc::clone(&res.values);
+            let stop_update = Arc::clone(&res.stop_update);
+            move || {
+                let mut x: f64 = 1.0;
+                while !stop_update.load(Ordering::Relaxed) {
+                    thread::sleep(Duration::from_millis(refresh_ms));
+                    let mut guard = values.write().unwrap();
+                    guard.push_back(x);
+                    while guard.len() > MAX_SIZE {
+                        guard.pop_front();
+                    }
+                    x += 1.0;
+                }
+            }
+        });
+
+        res
+    }
+
+    pub fn get_average_rate(&self) -> f64 {
+        let guard = self.values.read().unwrap();
+        guard.iter().sum::<f64>() / guard.len() as f64
+    }
 }
 
-/*
- * the rest of this file sets up unit tests
- * to run these, the command will be:
- * cargo test --package rust-counter-tutorial -- --nocapture
- * Note: 'rust-counter-tutorial' comes from cargo.toml's 'name' key
- */
+impl Drop for RateContract {
+    fn drop(&mut self) {
+        self.stop_update.store(true, Ordering::Relaxed)
+    }
+}
 
-// use the attribute below for unit tests
 #[cfg(test)]
 mod tests {
     use super::*;
     use near_sdk::MockedBlockchain;
     use near_sdk::{testing_env, VMContext};
 
-    // part of writing unit tests is setting up a mock context
-    // in this example, this is only needed for env::log in the contract
-    // this is also a useful list to peek at when wondering what's available in env::*
     fn get_context(input: Vec<u8>, is_view: bool) -> VMContext {
         VMContext {
             current_account_id: "alice.testnet".to_string(),
@@ -132,40 +102,43 @@ mod tests {
         }
     }
 
-    // mark individual unit tests with #[test] for them to be registered and fired
     #[test]
-    fn increment() {
-        // set up the mock context into the testing environment
+    fn get_rate_nan() {
         let context = get_context(vec![], false);
         testing_env!(context);
-        // instantiate a contract variable with the counter at zero
-        let mut contract = Counter { val: 0 };
-        contract.increment();
-        println!("Value after increment: {}", contract.get_num());
-        // confirm that we received 1 when calling get_num
-        assert_eq!(1, contract.get_num());
-    }
+        let refresh_interval_ms = 100;
+        let contract = RateContract::new(refresh_interval_ms);
 
-    #[test]
-    fn decrement() {
-        let context = get_context(vec![], false);
-        testing_env!(context);
-        let mut contract = Counter { val: 0 };
-        contract.decrement();
-        println!("Value after decrement: {}", contract.get_num());
-        // confirm that we received -1 when calling get_num
-        assert_eq!(-1, contract.get_num());
-    }
+        // []
+        thread::sleep(Duration::from_millis(refresh_interval_ms / 2));
+        assert_eq!(true, f64::is_nan(contract.get_average_rate()));
 
-    #[test]
-    fn increment_and_reset() {
-        let context = get_context(vec![], false);
-        testing_env!(context);
-        let mut contract = Counter { val: 0 };
-        contract.increment();
-        contract.reset();
-        println!("Value after reset: {}", contract.get_num());
-        // confirm that we received -1 when calling get_num
-        assert_eq!(0, contract.get_num());
+        // [1.0]
+        thread::sleep(Duration::from_millis(refresh_interval_ms));
+        assert_eq!(1.0, contract.get_average_rate());
+
+        // [1.0, 2.0]
+        thread::sleep(Duration::from_millis(refresh_interval_ms));
+        assert_eq!(1.5, contract.get_average_rate());
+
+        // [1.0, 2.0, 3.0]
+        thread::sleep(Duration::from_millis(refresh_interval_ms));
+        assert_eq!(2.0, contract.get_average_rate());
+
+        // [1.0, 2.0, 3.0, 4.0]
+        thread::sleep(Duration::from_millis(refresh_interval_ms));
+        assert_eq!(2.5, contract.get_average_rate());
+
+        // [1.0, 2.0, 3.0, 4.0, 5.0]
+        thread::sleep(Duration::from_millis(refresh_interval_ms));
+        assert_eq!(3.0, contract.get_average_rate());
+
+        // [2.0, 3.0, 4.0, 5.0, 6.0]
+        thread::sleep(Duration::from_millis(refresh_interval_ms));
+        assert_eq!(4.0, contract.get_average_rate());
+
+        // [3.0, 4.0, 5.0, 6.0, 7.0]
+        thread::sleep(Duration::from_millis(refresh_interval_ms));
+        assert_eq!(5.0, contract.get_average_rate());
     }
 }
