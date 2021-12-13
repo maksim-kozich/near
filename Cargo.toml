@@ -9,6 +9,9 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 near-sdk = "3.1.0"
+eyre = "0.6"
+ureq = {version = "2.3", features = ["json"]}
+serde = "1.0"
 
 [profile.release]
 codegen-units = 1

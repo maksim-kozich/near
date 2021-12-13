@@ -1,27 +1,84 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, RwLock};
 use std::sync::atomic::{AtomicBool, Ordering};
-// use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
-use near_sdk::collections::Vector;
-use near_sdk::near_bindgen;
-
 use std::thread;
 use std::time::Duration;
 
+use eyre::Result;
+use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
+// use near_sdk::collections::Vector;
+use near_sdk::{near_bindgen, env};
+
 near_sdk::setup_alloc!();
 
-// const CMC_PRO_API_KEY: &str = "b89d1f7b-2ada-4334-9545-c6ce17e88698";
-// const CMC_SYMBOL: &str = "BTC";
-// const CMC_PRO_API_QUOTES_URI: &str = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest";
 const MAX_SIZE: usize = 5;
 
+mod cmc {
+    const CMC_PRO_API_QUOTES_URI: &str = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest";
+    const CMC_PRO_API_KEY: &str = "b89d1f7b-2ada-4334-9545-c6ce17e88698";
+    const CMC_SYMBOL: &str = "BTC";
+    const CMC_CURRENCY: &str = "USD";
+    const CMC_TIMEOUT_SECS: u64 = 5;
+
+    use ureq::Error;
+    use std::collections::HashMap;
+
+    #[derive(serde::Serialize, serde::Deserialize)]
+    pub struct CmcRateProvider;
+
+    impl super::RateProvider for CmcRateProvider {
+        fn get_rate(&mut self) -> super::Result<f64> {
+            match ureq::get(CMC_PRO_API_QUOTES_URI)
+                .set("X-CMC_PRO_API_KEY", CMC_PRO_API_KEY)
+                .query("symbol", CMC_SYMBOL)
+                .timeout(super::Duration::from_secs(CMC_TIMEOUT_SECS))
+                .call() {
+                Ok(response) => {
+                    let response = response.into_json::<CmcResponse>()
+                        .map_err(eyre::Report::from)?;
+                    let data_item = response.data.get(CMC_SYMBOL)
+                        .ok_or_else(|| eyre::eyre!("CMC symbol {} not found in response", CMC_SYMBOL))?;
+                    let quote = data_item.quote.get(CMC_CURRENCY)
+                        .ok_or_else(|| eyre::eyre!("CMC currency {} not found in response", CMC_CURRENCY))?;
+                    Ok(quote.price)
+                },
+                Err(Error::Status(code, _response)) => {
+                    Err(eyre::eyre!("non-200 response status: {}", code))
+                }
+                Err(err) => {
+                    Err(eyre::eyre!("some kind of io/transport error: {}", err))
+                }
+            }
+        }
+    }
+
+    #[derive(serde::Deserialize)]
+    pub struct CmcResponse {
+        pub data: HashMap<String, CmcDataItem>,
+    }
+
+    #[derive(serde::Deserialize)]
+    pub struct CmcDataItem {
+        pub quote: HashMap<String, CmcQuote>,
+    }
+
+    #[derive(serde::Deserialize)]
+    pub struct CmcQuote {
+        pub price: f64,
+    }
+}
+
+pub trait RateProvider: serde::de::DeserializeOwned {
+    fn get_rate(&mut self) -> Result<f64>;
+}
+
 #[near_bindgen]
-// #[derive(BorshDeserialize, BorshSerialize)]
+#[derive(BorshDeserialize, BorshSerialize)]
 pub struct RateContract {
-    // #[borsh_skip]
-    // handle: Option<JoinHandle<()>>,
+    #[borsh_skip]
     // values: Arc<RwLock<Vector<f64>>>,
     values: Arc<RwLock<VecDeque<f64>>>,
+    #[borsh_skip]
     stop_update: Arc<AtomicBool>,
 }
 
@@ -30,7 +87,6 @@ impl Default for RateContract {
         // let v = Vector::new(b"v".to_vec());
         let v = VecDeque::new();
         Self {
-            // handle: None,
             values: Arc::new(RwLock::new(v)),
             stop_update: Arc::new(AtomicBool::new(false))
         }
@@ -40,22 +96,29 @@ impl Default for RateContract {
 #[near_bindgen]
 impl RateContract {
     #[init]
-    pub fn new(refresh_ms: u64) -> Self {
+    pub fn new(refresh_ms: u64, mut rate_provider: impl RateProvider) -> Self {
         let res = Self::default();
 
         let _handle = thread::spawn({
             let values = Arc::clone(&res.values);
             let stop_update = Arc::clone(&res.stop_update);
             move || {
-                let mut x: f64 = 1.0;
                 while !stop_update.load(Ordering::Relaxed) {
                     thread::sleep(Duration::from_millis(refresh_ms));
-                    let mut guard = values.write().unwrap();
-                    guard.push_back(x);
-                    while guard.len() > MAX_SIZE {
-                        guard.pop_front();
+
+                    match rate_provider.get_rate() {
+                        Ok(rate) => {
+                            let mut guard = values.write().unwrap();
+                            guard.push_back(rate);
+                            while guard.len() > MAX_SIZE {
+                                guard.pop_front();
+                            }
+                        },
+                        Err(err) => {
+                            let log_message = format!("Failed to get rate: {}", err);
+                            env::log(log_message.as_bytes());
+                        }
                     }
-                    x += 1.0;
                 }
             }
         });
@@ -81,6 +144,22 @@ mod tests {
     use near_sdk::MockedBlockchain;
     use near_sdk::{testing_env, VMContext};
 
+    #[derive(serde::Serialize)]
+    struct MockRateProvider {
+        pub rates: VecDeque<f64>
+    }
+
+    impl RateProvider for MockRateProvider {
+        fn get_rate(&mut self) -> Result<f64> {
+            if let Some(x) = self.rates.pop_front() {
+                self.rates.push_back(x);
+                Ok(x)
+            } else {
+                Err(eyre::eyre!("provider is empty"))
+            }
+        }
+    }
+
     fn get_context(input: Vec<u8>, is_view: bool) -> VMContext {
         VMContext {
             current_account_id: "alice.testnet".to_string(),
@@ -103,11 +182,15 @@ mod tests {
     }
 
     #[test]
-    fn get_rate_nan() {
+    fn get_rate() {
         let context = get_context(vec![], false);
         testing_env!(context);
         let refresh_interval_ms = 100;
-        let contract = RateContract::new(refresh_interval_ms);
+        let rate_provider = MockRateProvider {
+            rates: vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0].into()
+        };
+        // let rate_provider = CmcRateProvider;
+        let contract = RateContract::new(refresh_interval_ms, rate_provider);
 
         // []
         thread::sleep(Duration::from_millis(refresh_interval_ms / 2));
