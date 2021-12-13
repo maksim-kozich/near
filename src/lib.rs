@@ -6,7 +6,6 @@ use std::time::Duration;
 
 use eyre::Result;
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
-// use near_sdk::collections::Vector;
 use near_sdk::{near_bindgen, env};
 
 near_sdk::setup_alloc!();
@@ -19,11 +18,12 @@ mod cmc {
     const CMC_SYMBOL: &str = "BTC";
     const CMC_CURRENCY: &str = "USD";
     const CMC_TIMEOUT_SECS: u64 = 5;
+    pub const CMC_REFRESH_INTERVAL_MS: u64 = 1000;
 
     use ureq::Error;
     use std::collections::HashMap;
 
-    #[derive(serde::Serialize, serde::Deserialize)]
+    #[derive(serde::Serialize)]
     pub struct CmcRateProvider;
 
     impl super::RateProvider for CmcRateProvider {
@@ -68,7 +68,7 @@ mod cmc {
     }
 }
 
-pub trait RateProvider: serde::de::DeserializeOwned {
+pub trait RateProvider {
     fn get_rate(&mut self) -> Result<f64>;
 }
 
@@ -76,7 +76,6 @@ pub trait RateProvider: serde::de::DeserializeOwned {
 #[derive(BorshDeserialize, BorshSerialize)]
 pub struct RateContract {
     #[borsh_skip]
-    // values: Arc<RwLock<Vector<f64>>>,
     values: Arc<RwLock<VecDeque<f64>>>,
     #[borsh_skip]
     stop_update: Arc<AtomicBool>,
@@ -84,7 +83,6 @@ pub struct RateContract {
 
 impl Default for RateContract {
     fn default() -> Self {
-        // let v = Vector::new(b"v".to_vec());
         let v = VecDeque::new();
         Self {
             values: Arc::new(RwLock::new(v)),
@@ -96,9 +94,11 @@ impl Default for RateContract {
 #[near_bindgen]
 impl RateContract {
     #[init]
-    pub fn new(refresh_ms: u64, mut rate_provider: impl RateProvider) -> Self {
+    pub fn new() -> Self {
         let res = Self::default();
 
+        let refresh_ms = cmc::CMC_REFRESH_INTERVAL_MS;
+        let mut rate_provider = cmc::CmcRateProvider;
         let _handle = thread::spawn({
             let values = Arc::clone(&res.values);
             let stop_update = Arc::clone(&res.stop_update);
@@ -185,12 +185,11 @@ mod tests {
     fn get_rate() {
         let context = get_context(vec![], false);
         testing_env!(context);
-        let refresh_interval_ms = 100;
+        let refresh_interval_ms = cmc::CMC_REFRESH_INTERVAL_MS;
         let rate_provider = MockRateProvider {
             rates: vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0].into()
         };
-        // let rate_provider = CmcRateProvider;
-        let contract = RateContract::new(refresh_interval_ms, rate_provider);
+        let contract = RateContract::new();
 
         // []
         thread::sleep(Duration::from_millis(refresh_interval_ms / 2));
