@@ -18,7 +18,6 @@ mod cmc {
     const CMC_SYMBOL: &str = "BTC";
     const CMC_CURRENCY: &str = "USD";
     const CMC_TIMEOUT_SECS: u64 = 5;
-    pub const CMC_REFRESH_INTERVAL_MS: u64 = 1000;
 
     use ureq::Error;
     use std::collections::HashMap;
@@ -94,30 +93,30 @@ impl Default for RateContract {
 #[near_bindgen]
 impl RateContract {
     #[init]
-    pub fn new() -> Self {
+    pub fn new(refresh_ms: u64) -> Self {
         let res = Self::default();
 
-        let refresh_ms = cmc::CMC_REFRESH_INTERVAL_MS;
+        // let mut rate_provider = MockRateProvider {
+        //     rates: vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0].into()
+        // };
         let mut rate_provider = cmc::CmcRateProvider;
-        let _handle = thread::spawn({
-            let values = Arc::clone(&res.values);
-            let stop_update = Arc::clone(&res.stop_update);
-            move || {
-                while !stop_update.load(Ordering::Relaxed) {
-                    thread::sleep(Duration::from_millis(refresh_ms));
+        let values = Arc::clone(&res.values);
+        let stop_update = Arc::clone(&res.stop_update);
+        let _handle = std::thread::spawn(move || {
+            while !stop_update.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(refresh_ms));
 
-                    match rate_provider.get_rate() {
-                        Ok(rate) => {
-                            let mut guard = values.write().unwrap();
-                            guard.push_back(rate);
-                            while guard.len() > MAX_SIZE {
-                                guard.pop_front();
-                            }
-                        },
-                        Err(err) => {
-                            let log_message = format!("Failed to get rate: {}", err);
-                            env::log(log_message.as_bytes());
+                match rate_provider.get_rate() {
+                    Ok(rate) => {
+                        let mut guard = values.write().unwrap();
+                        guard.push_back(rate);
+                        while guard.len() > MAX_SIZE {
+                            guard.pop_front();
                         }
+                    },
+                    Err(err) => {
+                        let log_message = format!("Failed to get rate: {}", err);
+                        env::log(log_message.as_bytes());
                     }
                 }
             }
@@ -138,27 +137,27 @@ impl Drop for RateContract {
     }
 }
 
+#[derive(serde::Serialize)]
+struct MockRateProvider {
+    pub rates: VecDeque<f64>
+}
+
+impl RateProvider for MockRateProvider {
+    fn get_rate(&mut self) -> Result<f64> {
+        if let Some(x) = self.rates.pop_front() {
+            self.rates.push_back(x);
+            Ok(x)
+        } else {
+            Err(eyre::eyre!("provider is empty"))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use near_sdk::MockedBlockchain;
     use near_sdk::{testing_env, VMContext};
-
-    #[derive(serde::Serialize)]
-    struct MockRateProvider {
-        pub rates: VecDeque<f64>
-    }
-
-    impl RateProvider for MockRateProvider {
-        fn get_rate(&mut self) -> Result<f64> {
-            if let Some(x) = self.rates.pop_front() {
-                self.rates.push_back(x);
-                Ok(x)
-            } else {
-                Err(eyre::eyre!("provider is empty"))
-            }
-        }
-    }
 
     fn get_context(input: Vec<u8>, is_view: bool) -> VMContext {
         VMContext {
@@ -185,11 +184,8 @@ mod tests {
     fn get_rate() {
         let context = get_context(vec![], false);
         testing_env!(context);
-        let refresh_interval_ms = cmc::CMC_REFRESH_INTERVAL_MS;
-        let rate_provider = MockRateProvider {
-            rates: vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0].into()
-        };
-        let contract = RateContract::new();
+        let refresh_interval_ms = 10;
+        let contract = RateContract::new(refresh_interval_ms);
 
         // []
         thread::sleep(Duration::from_millis(refresh_interval_ms / 2));
