@@ -74,6 +74,7 @@ impl RateContract {
             let new_val = self.values.get(self.values.len() - 1).unwrap() * 2.5;
             Ok(new_val)
         }
+        // TODO: fix Error: Querying [object Object] failed: wasm execution failed with error: FunctionCallError(CompilationError(PrepareError(Instantiate))).
         /*match ureq::get(CMC_PRO_API_QUOTES_URI)
             .set("X-CMC_PRO_API_KEY", CMC_PRO_API_KEY)
             .query("symbol", CMC_SYMBOL)
