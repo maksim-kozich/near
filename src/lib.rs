@@ -68,7 +68,13 @@ impl RateContract {
     }
 
     fn get_rate(&self) -> Result<f64, String> {
-        match ureq::get(CMC_PRO_API_QUOTES_URI)
+        if self.values.is_empty() {
+            Ok(1.0)
+        } else {
+            let new_val = self.values.get(self.values.len() - 1).unwrap() * 2.5;
+            Ok(new_val)
+        }
+        /*match ureq::get(CMC_PRO_API_QUOTES_URI)
             .set("X-CMC_PRO_API_KEY", CMC_PRO_API_KEY)
             .query("symbol", CMC_SYMBOL)
             .timeout(std::time::Duration::from_secs(CMC_TIMEOUT_SECS))
@@ -91,7 +97,7 @@ impl RateContract {
                 Err(format!("non-200 response status: {}", code))
             }
             Err(err) => Err(format!("some kind of io/transport error: {}", err)),
-        }
+        }*/
     }
 }
 
