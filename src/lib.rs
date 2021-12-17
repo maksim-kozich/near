@@ -1,12 +1,8 @@
-use std::collections::VecDeque;
-use std::sync::{Arc, RwLock};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread;
-use std::time::Duration;
-
 use eyre::Result;
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::{near_bindgen, env};
+use near_sdk::collections::Vector;
+use std::time::Duration;
 
 near_sdk::setup_alloc!();
 
@@ -22,31 +18,26 @@ mod cmc {
     use ureq::Error;
     use std::collections::HashMap;
 
-    #[derive(serde::Serialize)]
-    pub struct CmcRateProvider;
-
-    impl super::RateProvider for CmcRateProvider {
-        fn get_rate(&mut self) -> super::Result<f64> {
-            match ureq::get(CMC_PRO_API_QUOTES_URI)
-                .set("X-CMC_PRO_API_KEY", CMC_PRO_API_KEY)
-                .query("symbol", CMC_SYMBOL)
-                .timeout(super::Duration::from_secs(CMC_TIMEOUT_SECS))
-                .call() {
-                Ok(response) => {
-                    let response = response.into_json::<CmcResponse>()
-                        .map_err(eyre::Report::from)?;
-                    let data_item = response.data.get(CMC_SYMBOL)
-                        .ok_or_else(|| eyre::eyre!("CMC symbol {} not found in response", CMC_SYMBOL))?;
-                    let quote = data_item.quote.get(CMC_CURRENCY)
-                        .ok_or_else(|| eyre::eyre!("CMC currency {} not found in response", CMC_CURRENCY))?;
-                    Ok(quote.price)
-                },
-                Err(Error::Status(code, _response)) => {
-                    Err(eyre::eyre!("non-200 response status: {}", code))
-                }
-                Err(err) => {
-                    Err(eyre::eyre!("some kind of io/transport error: {}", err))
-                }
+    pub(crate) fn get_rate() -> super::Result<f64> {
+        match ureq::get(CMC_PRO_API_QUOTES_URI)
+            .set("X-CMC_PRO_API_KEY", CMC_PRO_API_KEY)
+            .query("symbol", CMC_SYMBOL)
+            .timeout(super::Duration::from_secs(CMC_TIMEOUT_SECS))
+            .call() {
+            Ok(response) => {
+                let response = response.into_json::<CmcResponse>()
+                    .map_err(eyre::Report::from)?;
+                let data_item = response.data.get(CMC_SYMBOL)
+                    .ok_or_else(|| eyre::eyre!("CMC symbol {} not found in response", CMC_SYMBOL))?;
+                let quote = data_item.quote.get(CMC_CURRENCY)
+                    .ok_or_else(|| eyre::eyre!("CMC currency {} not found in response", CMC_CURRENCY))?;
+                Ok(quote.price)
+            },
+            Err(Error::Status(code, _response)) => {
+                Err(eyre::eyre!("non-200 response status: {}", code))
+            }
+            Err(err) => {
+                Err(eyre::eyre!("some kind of io/transport error: {}", err))
             }
         }
     }
@@ -67,91 +58,46 @@ mod cmc {
     }
 }
 
-pub trait RateProvider {
-    fn get_rate(&mut self) -> Result<f64>;
-}
-
 #[near_bindgen]
 #[derive(BorshDeserialize, BorshSerialize)]
 pub struct RateContract {
-    #[borsh_skip]
-    values: Arc<RwLock<VecDeque<f64>>>,
-    #[borsh_skip]
-    stop_update: Arc<AtomicBool>,
+    values: Vector<f64>,
 }
 
 impl Default for RateContract {
     fn default() -> Self {
-        let v = VecDeque::new();
         Self {
-            values: Arc::new(RwLock::new(v)),
-            stop_update: Arc::new(AtomicBool::new(false))
+            values: Vector::new(b"v".to_vec()),
         }
     }
 }
 
 #[near_bindgen]
 impl RateContract {
-    #[init]
-    pub fn new(refresh_ms: u64) -> Self {
-        let res = Self::default();
 
-        // let mut rate_provider = MockRateProvider {
-        //     rates: vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0].into()
-        // };
-        let mut rate_provider = cmc::CmcRateProvider;
-        let values = Arc::clone(&res.values);
-        let stop_update = Arc::clone(&res.stop_update);
-        let _handle = std::thread::spawn(move || {
-            while !stop_update.load(Ordering::Relaxed) {
-                std::thread::sleep(Duration::from_millis(refresh_ms));
-
-                match rate_provider.get_rate() {
-                    Ok(rate) => {
-                        let mut guard = values.write().unwrap();
-                        guard.push_back(rate);
-                        while guard.len() > MAX_SIZE {
-                            guard.pop_front();
-                        }
-                    },
-                    Err(err) => {
-                        let log_message = format!("Failed to get rate: {}", err);
-                        env::log(log_message.as_bytes());
-                    }
+    pub fn refresh(&mut self) {
+        match cmc::get_rate() {
+            Ok(rate) => {
+                self.values.push(&rate);
+                let len = self.values.len() as usize;
+                while len > MAX_SIZE {
+                    let new_values: Vec<f64> = self.values.iter().skip(MAX_SIZE - len).collect();
+                    self.values.clear();
+                    self.values.extend(new_values);
                 }
+            },
+            Err(err) => {
+                let log_message = format!("Failed to get rate: {}", err);
+                env::log(log_message.as_bytes());
             }
-        });
-
-        res
-    }
-
-    pub fn get_average_rate(&self) -> f64 {
-        let guard = self.values.read().unwrap();
-        guard.iter().sum::<f64>() / guard.len() as f64
-    }
-}
-
-impl Drop for RateContract {
-    fn drop(&mut self) {
-        self.stop_update.store(true, Ordering::Relaxed)
-    }
-}
-
-#[derive(serde::Serialize)]
-struct MockRateProvider {
-    pub rates: VecDeque<f64>
-}
-
-impl RateProvider for MockRateProvider {
-    fn get_rate(&mut self) -> Result<f64> {
-        if let Some(x) = self.rates.pop_front() {
-            self.rates.push_back(x);
-            Ok(x)
-        } else {
-            Err(eyre::eyre!("provider is empty"))
         }
     }
+
+    pub fn get_num(&self) -> f64 {
+        self.values.iter().sum::<f64>() / self.values.len() as f64
+    }
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -184,39 +130,9 @@ mod tests {
     fn get_rate() {
         let context = get_context(vec![], false);
         testing_env!(context);
-        let refresh_interval_ms = 10;
-        let contract = RateContract::new(refresh_interval_ms);
+        let contract = RateContract::default();
 
         // []
-        thread::sleep(Duration::from_millis(refresh_interval_ms / 2));
-        assert_eq!(true, f64::is_nan(contract.get_average_rate()));
-
-        // [1.0]
-        thread::sleep(Duration::from_millis(refresh_interval_ms));
-        assert_eq!(1.0, contract.get_average_rate());
-
-        // [1.0, 2.0]
-        thread::sleep(Duration::from_millis(refresh_interval_ms));
-        assert_eq!(1.5, contract.get_average_rate());
-
-        // [1.0, 2.0, 3.0]
-        thread::sleep(Duration::from_millis(refresh_interval_ms));
-        assert_eq!(2.0, contract.get_average_rate());
-
-        // [1.0, 2.0, 3.0, 4.0]
-        thread::sleep(Duration::from_millis(refresh_interval_ms));
-        assert_eq!(2.5, contract.get_average_rate());
-
-        // [1.0, 2.0, 3.0, 4.0, 5.0]
-        thread::sleep(Duration::from_millis(refresh_interval_ms));
-        assert_eq!(3.0, contract.get_average_rate());
-
-        // [2.0, 3.0, 4.0, 5.0, 6.0]
-        thread::sleep(Duration::from_millis(refresh_interval_ms));
-        assert_eq!(4.0, contract.get_average_rate());
-
-        // [3.0, 4.0, 5.0, 6.0, 7.0]
-        thread::sleep(Duration::from_millis(refresh_interval_ms));
-        assert_eq!(5.0, contract.get_average_rate());
+        assert_eq!(true, f64::is_nan(contract.get_num()));
     }
 }
