@@ -1,64 +1,33 @@
-use eyre::Result;
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::collections::Vector;
 use near_sdk::{env, near_bindgen};
-use std::time::Duration;
+
+use std::collections::HashMap;
 
 near_sdk::setup_alloc!();
 
 const MAX_SIZE: usize = 5;
 
-mod cmc {
-    const CMC_PRO_API_QUOTES_URI: &str =
-        "https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest";
-    const CMC_PRO_API_KEY: &str = "b89d1f7b-2ada-4334-9545-c6ce17e88698";
-    const CMC_SYMBOL: &str = "BTC";
-    const CMC_CURRENCY: &str = "USD";
-    const CMC_TIMEOUT_SECS: u64 = 5;
+const CMC_PRO_API_QUOTES_URI: &str =
+    "https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest";
+const CMC_PRO_API_KEY: &str = "b89d1f7b-2ada-4334-9545-c6ce17e88698";
+const CMC_SYMBOL: &str = "BTC";
+const CMC_CURRENCY: &str = "USD";
+const CMC_TIMEOUT_SECS: u64 = 5;
 
-    use std::collections::HashMap;
-    use ureq::Error;
+#[derive(serde::Deserialize)]
+pub struct CmcResponse {
+    pub data: HashMap<String, CmcDataItem>,
+}
 
-    pub(crate) fn get_rate() -> super::Result<f64> {
-        match ureq::get(CMC_PRO_API_QUOTES_URI)
-            .set("X-CMC_PRO_API_KEY", CMC_PRO_API_KEY)
-            .query("symbol", CMC_SYMBOL)
-            .timeout(super::Duration::from_secs(CMC_TIMEOUT_SECS))
-            .call()
-        {
-            Ok(response) => {
-                let response = response
-                    .into_json::<CmcResponse>()
-                    .map_err(eyre::Report::from)?;
-                let data_item = response.data.get(CMC_SYMBOL).ok_or_else(|| {
-                    eyre::eyre!("CMC symbol {} not found in response", CMC_SYMBOL)
-                })?;
-                let quote = data_item.quote.get(CMC_CURRENCY).ok_or_else(|| {
-                    eyre::eyre!("CMC currency {} not found in response", CMC_CURRENCY)
-                })?;
-                Ok(quote.price)
-            }
-            Err(Error::Status(code, _response)) => {
-                Err(eyre::eyre!("non-200 response status: {}", code))
-            }
-            Err(err) => Err(eyre::eyre!("some kind of io/transport error: {}", err)),
-        }
-    }
+#[derive(serde::Deserialize)]
+pub struct CmcDataItem {
+    pub quote: HashMap<String, CmcQuote>,
+}
 
-    #[derive(serde::Deserialize)]
-    pub struct CmcResponse {
-        pub data: HashMap<String, CmcDataItem>,
-    }
-
-    #[derive(serde::Deserialize)]
-    pub struct CmcDataItem {
-        pub quote: HashMap<String, CmcQuote>,
-    }
-
-    #[derive(serde::Deserialize)]
-    pub struct CmcQuote {
-        pub price: f64,
-    }
+#[derive(serde::Deserialize)]
+pub struct CmcQuote {
+    pub price: f64,
 }
 
 #[near_bindgen]
@@ -78,7 +47,7 @@ impl Default for RateContract {
 #[near_bindgen]
 impl RateContract {
     pub fn refresh(&mut self) {
-        match cmc::get_rate() {
+        match self.get_rate() {
             Ok(rate) => {
                 self.values.push(&rate);
                 let len = self.values.len() as usize;
@@ -97,6 +66,33 @@ impl RateContract {
 
     pub fn get_num(&self) -> f64 {
         self.values.iter().sum::<f64>() / self.values.len() as f64
+    }
+
+    fn get_rate(&self) -> Result<f64, String> {
+        match ureq::get(CMC_PRO_API_QUOTES_URI)
+            .set("X-CMC_PRO_API_KEY", CMC_PRO_API_KEY)
+            .query("symbol", CMC_SYMBOL)
+            .timeout(std::time::Duration::from_secs(CMC_TIMEOUT_SECS))
+            .call()
+        {
+            Ok(response) => {
+                let response = response
+                    .into_json::<CmcResponse>()
+                    .map_err(|err| format!("CMC response deserialize error: {}", err))?;
+                let data_item = response
+                    .data
+                    .get(CMC_SYMBOL)
+                    .ok_or_else(|| format!("CMC symbol {} not found in response", CMC_SYMBOL))?;
+                let quote = data_item.quote.get(CMC_CURRENCY).ok_or_else(|| {
+                    format!("CMC currency {} not found in response", CMC_CURRENCY)
+                })?;
+                Ok(quote.price)
+            }
+            Err(ureq::Error::Status(code, _response)) => {
+                Err(format!("non-200 response status: {}", code))
+            }
+            Err(err) => Err(format!("some kind of io/transport error: {}", err)),
+        }
     }
 }
 
