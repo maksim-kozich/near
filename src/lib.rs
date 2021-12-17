@@ -1,7 +1,7 @@
 use eyre::Result;
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
-use near_sdk::{near_bindgen, env};
 use near_sdk::collections::Vector;
+use near_sdk::{env, near_bindgen};
 use std::time::Duration;
 
 near_sdk::setup_alloc!();
@@ -9,36 +9,39 @@ near_sdk::setup_alloc!();
 const MAX_SIZE: usize = 5;
 
 mod cmc {
-    const CMC_PRO_API_QUOTES_URI: &str = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest";
+    const CMC_PRO_API_QUOTES_URI: &str =
+        "https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest";
     const CMC_PRO_API_KEY: &str = "b89d1f7b-2ada-4334-9545-c6ce17e88698";
     const CMC_SYMBOL: &str = "BTC";
     const CMC_CURRENCY: &str = "USD";
     const CMC_TIMEOUT_SECS: u64 = 5;
 
-    use ureq::Error;
     use std::collections::HashMap;
+    use ureq::Error;
 
     pub(crate) fn get_rate() -> super::Result<f64> {
         match ureq::get(CMC_PRO_API_QUOTES_URI)
             .set("X-CMC_PRO_API_KEY", CMC_PRO_API_KEY)
             .query("symbol", CMC_SYMBOL)
             .timeout(super::Duration::from_secs(CMC_TIMEOUT_SECS))
-            .call() {
+            .call()
+        {
             Ok(response) => {
-                let response = response.into_json::<CmcResponse>()
+                let response = response
+                    .into_json::<CmcResponse>()
                     .map_err(eyre::Report::from)?;
-                let data_item = response.data.get(CMC_SYMBOL)
-                    .ok_or_else(|| eyre::eyre!("CMC symbol {} not found in response", CMC_SYMBOL))?;
-                let quote = data_item.quote.get(CMC_CURRENCY)
-                    .ok_or_else(|| eyre::eyre!("CMC currency {} not found in response", CMC_CURRENCY))?;
+                let data_item = response.data.get(CMC_SYMBOL).ok_or_else(|| {
+                    eyre::eyre!("CMC symbol {} not found in response", CMC_SYMBOL)
+                })?;
+                let quote = data_item.quote.get(CMC_CURRENCY).ok_or_else(|| {
+                    eyre::eyre!("CMC currency {} not found in response", CMC_CURRENCY)
+                })?;
                 Ok(quote.price)
-            },
+            }
             Err(Error::Status(code, _response)) => {
                 Err(eyre::eyre!("non-200 response status: {}", code))
             }
-            Err(err) => {
-                Err(eyre::eyre!("some kind of io/transport error: {}", err))
-            }
+            Err(err) => Err(eyre::eyre!("some kind of io/transport error: {}", err)),
         }
     }
 
@@ -74,7 +77,6 @@ impl Default for RateContract {
 
 #[near_bindgen]
 impl RateContract {
-
     pub fn refresh(&mut self) {
         match cmc::get_rate() {
             Ok(rate) => {
@@ -85,7 +87,7 @@ impl RateContract {
                     self.values.clear();
                     self.values.extend(new_values);
                 }
-            },
+            }
             Err(err) => {
                 let log_message = format!("Failed to get rate: {}", err);
                 env::log(log_message.as_bytes());
@@ -97,7 +99,6 @@ impl RateContract {
         self.values.iter().sum::<f64>() / self.values.len() as f64
     }
 }
-
 
 #[cfg(test)]
 mod tests {
