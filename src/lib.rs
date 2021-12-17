@@ -50,9 +50,8 @@ impl RateContract {
         match self.get_rate() {
             Ok(rate) => {
                 self.values.push(&rate);
-                let len = self.values.len() as usize;
-                while len > MAX_SIZE {
-                    let new_values: Vec<f64> = self.values.iter().skip(MAX_SIZE - len).collect();
+                if self.values.len() as usize > MAX_SIZE {
+                    let new_values: Vec<f64> = self.values.iter().skip(self.values.len() as usize - MAX_SIZE).collect();
                     self.values.clear();
                     self.values.extend(new_values);
                 }
